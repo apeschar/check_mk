@@ -1,0 +1,54 @@
+#!/bin/bash
+
+find_apache_certs() {
+    if type apachectl &>/dev/null; then
+        apachectl -t -D DUMP_INCLUDES 2>/dev/null |
+            grep -oP '/[^\s"]+' |
+            xargs cat 2>/dev/null |
+            grep_certs 'sslcertificatefile'
+    fi
+}
+
+find_nginx_certs() {
+    nginx_opts=()
+
+    # Try to autodetect alternative config
+    nginx_cfg="$(ps ax | grep -Pio ' [n]ginx: master process .* -c \K\S+')"
+    if [[ $nginx_cfg != "" ]] && [[ -f $nginx_cfg ]]; then
+        nginx_opts+=( -c "$nginx_cfg" )
+    fi
+
+    nginx -T "${nginx_opts[@]}" 2>/dev/null | grep_certs 'ssl_certificate'
+}
+
+find_all_certs() {
+    find_apache_certs
+    find_nginx_certs
+}
+
+grep_certs() {
+    grep -Pio '^\s*'"$1"'\s+"?\K[^\s;"]+'
+}
+
+only_certificate_files() {
+    xargs grep -l -- '-----BEGIN CERTIFICATE-----'
+}
+
+certificates=( $(find_all_certs | sort -u | only_certificate_files) )
+
+tmp="$(mktemp)"
+trap "rm -f '$tmp'" EXIT
+
+echo '<<<sslcertificates>>>'
+for cert in "${certificates[@]}"; do
+    if ! openssl x509 -noout -enddate -subject -text < "$cert" > "$tmp"; then
+        continue
+    fi
+
+    cert_enddate=$( grep -Pom1 'notAfter=\K.+' "$tmp" )
+    cert_enddate_unix=$( date -d "$cert_enddate" '+%s' )
+    cert_subject=$( grep -Pom1 'subject=\K.+' "$tmp" )
+    cert_algo=$( grep -Pom1 'Signature Algorithm: \K.+' "$tmp" )
+
+    echo $cert $cert_enddate_unix $cert_algo $cert_subject
+done
